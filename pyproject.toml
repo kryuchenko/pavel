@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pavel"
+version = "0.6.0"
+description = "Problem & Anomaly Vector Embedding Locator for Google Play reviews"
+authors = [
+    {name = "Andrey Kryuchenko", email = "andrey1984@gmail.com"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+dependencies = [
+    "pymongo>=4.0.0",
+    "google-play-scraper>=3.1.2", 
+    "sentence-transformers>=2.2.0",
+    "scikit-learn>=1.3.0",
+    "numpy>=1.21.0",
+    "pandas>=1.5.0",
+    "aiohttp>=3.8.0",
+    "pydantic>=2.0.0",
+    "hdbscan>=0.8.29",
+    "umap-learn>=0.5.3",
+    "langdetect>=1.0.9",
+    "simhash>=2.1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
+]
+
+api = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+]
+
+dashboard = [
+    "streamlit>=1.25.0",
+    "plotly>=5.15.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/kryuchenko/pavel"
+Repository = "https://github.com/kryuchenko/pavel"
+Issues = "https://github.com/kryuchenko/pavel/issues"
+
+[project.scripts]
+pavel = "applications.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py38", "py39", "py310", "py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+src_paths = ["src", "tests", "applications", "tools"]
+
+[tool.mypy]
+python_version = "3.8"
+packages = ["src.pavel"]
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+asyncio_mode = "auto"
+EOF < /dev/null

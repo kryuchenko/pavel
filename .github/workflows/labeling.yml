@@ -1,0 +1,44 @@
+name: ChatGPT Review Labeling
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: 'Number of reviews to process in each batch'
+        required: false
+        default: '50'
+      max_reviews:
+        description: 'Maximum number of reviews to label (0 for all)'
+        required: false
+        default: '0'
+
+jobs:
+  label-reviews:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+    
+    - name: Run ChatGPT labeling
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        PAVEL_DB_URI: ${{ secrets.PAVEL_DB_URI || 'mongodb://localhost:27017' }}
+      run: |
+        PYTHONPATH=src python tools/chatgpt_labeling.py \
+          --batch-size ${{ github.event.inputs.batch_size }} \
+          --max-reviews ${{ github.event.inputs.max_reviews }}
+    
+    - name: Upload labeled dataset
+      uses: actions/upload-artifact@v3
+      with:
+        name: chatgpt-labeled-dataset
+        path: data/chatgpt_labeled_dataset.json

@@ -1,0 +1,150 @@
+{
+  "app_id": "sinet.startup.inDriver",
+  "analysis_timestamp": "2025-08-12",
+  "field_data": {
+    "fields": [
+      "appVersion",
+      "at",
+      "content",
+      "repliedAt",
+      "replyContent",
+      "reviewCreatedVersion",
+      "reviewId",
+      "score",
+      "thumbsUpCount",
+      "userImage",
+      "userName"
+    ],
+    "field_types": {
+      "reviewId": [
+        "str"
+      ],
+      "userName": [
+        "str"
+      ],
+      "userImage": [
+        "str"
+      ],
+      "content": [
+        "str"
+      ],
+      "score": [
+        "int"
+      ],
+      "thumbsUpCount": [
+        "int"
+      ],
+      "reviewCreatedVersion": [
+        "str"
+      ],
+      "at": [
+        "datetime"
+      ],
+      "appVersion": [
+        "str"
+      ],
+      "replyContent": [
+        "str"
+      ],
+      "repliedAt": [
+        "datetime"
+      ]
+    },
+    "field_examples": {
+      "reviewId": "fda324fb-f172-4c13-a432-199f99220650",
+      "userName": "Prosper Masona",
+      "userImage": "https://play-lh.googleusercontent.com/a-/ALV-UjVTiLZ-ax_eH2KTwssiJhRnqD4F0tzNzbqdP6ALe09ZmPsIEi4",
+      "content": "so far so good 👍",
+      "score": 5,
+      "thumbsUpCount": 0,
+      "reviewCreatedVersion": "5.133.0",
+      "at": "2025-08-11 19:43:05",
+      "appVersion": "5.133.0",
+      "replyContent": "Hello! We apologize for any inconvenience caused by our app. We would like to understand the issue y...",
+      "repliedAt": "2024-11-25 06:32:59"
+    },
+    "field_presence": {
+      "reviewId": {
+        "total": 60,
+        "non_null": 60,
+        "non_empty": 60
+      },
+      "userName": {
+        "total": 60,
+        "non_null": 60,
+        "non_empty": 60
+      },
+      "userImage": {
+        "total": 60,
+        "non_null": 60,
+        "non_empty": 60
+      },
+      "content": {
+        "total": 60,
+        "non_null": 60,
+        "non_empty": 60
+      },
+      "score": {
+        "total": 60,
+        "non_null": 60,
+        "non_empty": 60
+      },
+      "thumbsUpCount": {
+        "total": 60,
+        "non_null": 60,
+        "non_empty": 60
+      },
+      "reviewCreatedVersion": {
+        "total": 60,
+        "non_null": 54,
+        "non_empty": 54
+      },
+      "at": {
+        "total": 60,
+        "non_null": 60,
+        "non_empty": 60
+      },
+      "replyContent": {
+        "total": 60,
+        "non_null": 23,
+        "non_empty": 23
+      },
+      "repliedAt": {
+        "total": 60,
+        "non_null": 23,
+        "non_empty": 23
+      },
+      "appVersion": {
+        "total": 60,
+        "non_null": 54,
+        "non_empty": 54
+      }
+    }
+  },
+  "suggested_schema": {
+    "_id": "String (appId:reviewId for uniqueness)",
+    "appId": "String (our app identifier)",
+    "reviewId": "String (Google Play review ID)",
+    "userName": "String (reviewer name)",
+    "userImage": "String (reviewer avatar URL, optional)",
+    "content": "String (review text)",
+    "score": "Number (1-5 star rating)",
+    "thumbsUpCount": "Number (helpful votes, optional)",
+    "at": "Date (review creation date)",
+    "appVersion": "String (app version when reviewed, optional)",
+    "replyContent": "String (developer reply text, optional)",
+    "repliedAt": "Date (developer reply date, optional)",
+    "locale": "String (en_US, ru_RU, etc.)",
+    "language": "String (detected language code)",
+    "country": "String (user country code)",
+    "createdAt": "Date (when ingested into our system)",
+    "updatedAt": "Date (last update)",
+    "processed": "Boolean (whether preprocessed)",
+    "sentences": "Array of processed sentences",
+    "complaints": "Array of complaint sentences with isComplaint flag",
+    "clusterId": "String (assigned cluster ID, optional)",
+    "source": "String (google_play)",
+    "fetchedAt": "Date (when fetched from API)",
+    "processingVersion": "String (version of processing pipeline)"
+  }
+}

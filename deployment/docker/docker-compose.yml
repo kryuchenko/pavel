@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  # MongoDB for PAVEL data storage
+  mongodb:
+    image: mongo:8
+    container_name: pavel-mongo
+    ports:
+      - "27017:27017"
+    environment:
+      # No authentication for development
+      - MONGO_INITDB_DATABASE=gp
+    volumes:
+      - pavel_mongodb_data:/data/db
+      - ./mongodb_schema.js:/docker-entrypoint-initdb.d/schema.js:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # MongoDB Admin UI (optional)
+  mongo-express:
+    image: mongo-express:latest
+    container_name: pavel-mongo-express  
+    ports:
+      - "8081:8081"
+    environment:
+      - ME_CONFIG_MONGODB_SERVER=mongodb
+      - ME_CONFIG_MONGODB_PORT=27017
+      - ME_CONFIG_BASICAUTH_USERNAME=pavel
+      - ME_CONFIG_BASICAUTH_PASSWORD=dev123
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+
+volumes:
+  pavel_mongodb_data:
+    driver: local
+
+networks:
+  default:
+    name: pavel-network
