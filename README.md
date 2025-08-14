@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="pavel.png" alt="PAVEL Logo" width="200"/>
+  <img src="pavel.png" alt="PAVEL Logo" width="400"/>
   
   # PAVEL — Problem & Anomaly Vector Embedding Locator
 
