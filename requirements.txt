@@ -1,6 +1,9 @@
 # PAVEL - Problem & Anomaly Vector Embedding Locator
 # Complete requirements file with LATEST versions
 
+# Python version requirement
+python_requires = ">=3.11"
+
 # Google Play scraping (LATEST)
 google-play-scraper==1.2.7
 
@@ -57,11 +60,18 @@ typing-extensions==4.15.0
 filelock==3.19.1
 
 # Installation instructions:
-# pip install -r requirements.txt
+# 1. Ensure Python 3.11+ is installed:
+#    python --version  # Should be 3.11 or higher
+#    
+# 2. Install all dependencies:
+#    pip install -r requirements.txt
 # 
-# For GPU support with PyTorch:
-# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# 3. For GPU support with PyTorch (recommended):
+#    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 #
-# For spaCy language models:
-# python -m spacy download en_core_web_sm
-# python -m spacy download ru_core_news_sm
+# 4. For spaCy language models:
+#    python -m spacy download en_core_web_sm
+#    python -m spacy download ru_core_news_sm
+#
+# Python 3.13 (latest): https://www.python.org/downloads/
+# Python 3.12: Also supported and stable
