@@ -71,10 +71,16 @@ class GooglePlayIngester:
     def _ensure_indexes(self):
         """Ensure required indexes exist"""
         indexes = [
-            [("appId", 1), ("at", -1)],  # App + date queries
-            [("appId", 1), ("score", 1)], # Rating analysis
-            [("createdAt", -1)],          # Recent reviews
-            [("flags.isRecent", 1)]       # Recent flag queries
+            [("appId", 1), ("at", -1)],         # App + date queries
+            [("appId", 1), ("score", 1)],       # Rating analysis
+            [("appId", 1), ("locale", 1)],      # App + locale queries
+            [("createdAt", -1)],                # Recent reviews
+            [("userName", 1)],                  # User-based queries
+            [("thumbsUpCount", -1)],            # Popular reviews
+            [("flags.isRecent", 1)],            # Recent flag queries
+            [("flags.hasUserImage", 1)],        # Reviews with avatars
+            [("appVersion", 1)],                # Version-based analysis
+            [("locale", 1), ("country", 1)]     # Geographic analysis
         ]
         
         for index_spec in indexes:
@@ -83,7 +89,7 @@ class GooglePlayIngester:
             except Exception as e:
                 logger.warning(f"Index creation warning: {e}")
                 
-    def _transform_review(self, review: Dict, app_id: str) -> Dict:
+    def _transform_review(self, review: Dict, app_id: str, locale: str = 'en') -> Dict:
         """
         Transform raw Google Play review to PAVEL format.
         
@@ -97,39 +103,42 @@ class GooglePlayIngester:
         if review_date and not review_date.tzinfo:
             review_date = review_date.replace(tzinfo=timezone.utc)
             
-        doc = {
+        # Start with all original review data
+        doc = dict(review)  # Copy all fields from scraper
+        
+        # Override/add key fields with proper handling
+        doc.update({
             "_id": f"{app_id}:{review_id}",  # Composite key for global uniqueness
             "appId": app_id,
             "reviewId": review_id,
-            "userName": review.get('userName', ''),
-            "content": review.get('content', ''),
-            "score": review.get('score', 0),
-            "thumbsUpCount": review.get('thumbsUpCount', 0), 
-            "reviewCreatedVersion": review.get('reviewCreatedVersion'),
-            "at": review_date,
-            "replyContent": review.get('replyContent'),
-            "repliedAt": review.get('repliedAt'),
-            "appVersion": review.get('appVersion'),
+            "at": review_date,  # Ensure timezone-aware datetime
             
             # PAVEL metadata
             "createdAt": now,
             "updatedAt": now,
             "processingStatus": "ingested",
+            "locale": locale,
+            "country": locale[:2] if len(locale) > 2 else locale,
+            
+            # Enhanced flags based on all available data
             "flags": {
                 "hasReply": bool(review.get('replyContent')),
                 "isRecent": (now - (review_date or now)).days < 30 if review_date else False,
                 "hasVersion": bool(review.get('appVersion')),
+                "hasUserImage": bool(review.get('userImage')),
+                "hasThumbsUp": bool(review.get('thumbsUpCount', 0) > 0),
                 "isPositive": review.get('score', 0) >= 4,
                 "isNegative": review.get('score', 0) <= 2
             },
             
-            # Complete data preservation
+            # Complete data preservation in rawData
             "rawData": {
                 "original": review,
                 "ingested_at": now.isoformat(),
-                "source": "google-play-scraper"
+                "source": "google-play-scraper",
+                "schema_version": "2.0"
             }
-        }
+        })
         
         return doc
         
@@ -168,14 +177,14 @@ class GooglePlayIngester:
             logger.debug(f"Traceback: {traceback.format_exc()}")
             raise
             
-    async def _insert_reviews(self, reviews: List[Dict], stats: IngestionStats) -> None:
+    async def _insert_reviews(self, reviews: List[Dict], stats: IngestionStats, locale: str = 'en') -> None:
         """Insert reviews into MongoDB with duplicate handling"""
         if not reviews:
             return
             
         try:
             # Transform all reviews
-            docs = [self._transform_review(review, stats.app_id) for review in reviews]
+            docs = [self._transform_review(review, stats.app_id, locale) for review in reviews]
             
             # Bulk insert with ordered=False for duplicate tolerance
             result = self.collection.insert_many(docs, ordered=False)
@@ -239,30 +248,46 @@ class GooglePlayIngester:
                     if not batch_reviews:
                         logger.info(f"No more reviews for {app_id} ({locale})")
                         break
+
+
+                    # Process reviews one by one for robustness
+                    processed_reviews = []
+                    for i, review in enumerate(batch_reviews):
+                        if not isinstance(review, dict):
+                            logger.warning(f"Skipping malformed entry at index {i} (not a dict): {review}")
+                            continue
+                        processed_reviews.append(review)
+
+                    if not processed_reviews:
+                        logger.info(f"No valid reviews in batch for {app_id} ({locale}) after filtering malformed data")
+                        break
+
+                    batch_reviews = processed_reviews
                         
                     # Check if we've gone too far back
                     oldest_review = min(batch_reviews, key=lambda r: r.get('at', datetime.min))
                     oldest_date = oldest_review.get('at')
                     
+                    stop_fetching = False
                     if oldest_date:
                         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_back)
                         if oldest_date.replace(tzinfo=timezone.utc) < cutoff_date:
                             logger.info(f"Reached {days_back} day cutoff for {app_id} ({locale})")
                             # Filter only recent reviews from this batch
                             batch_reviews = [r for r in batch_reviews 
-                                           if r.get('at', datetime.min).replace(tzinfo=timezone.utc) >= cutoff_date]
+                                           if r.get('at') and r.get('at').replace(tzinfo=timezone.utc) >= cutoff_date]
+                            stop_fetching = True
                             
                     stats.total_fetched += len(batch_reviews)
                     
                     # Insert batch
-                    await self._insert_reviews(batch_reviews, stats)
+                    await self._insert_reviews(batch_reviews, stats, locale)
                     
                     total_batches += 1
                     logger.debug(f"Completed batch {total_batches} for {app_id} ({locale})")
                     
                     # Stop if we've reached the date cutoff or no continuation
-                    if not continuation_token or (oldest_date and 
-                        oldest_date.replace(tzinfo=timezone.utc) < cutoff_date):
+                    if not continuation_token or stop_fetching:
                         break
                         
                 logger.info(f"Batch ingestion completed for {app_id} ({locale}): "
@@ -335,7 +360,7 @@ class GooglePlayIngester:
                     stats.total_fetched = len(batch_reviews)
                     
                     if new_reviews:
-                        await self._insert_reviews(new_reviews, stats)
+                        await self._insert_reviews(new_reviews, stats, locale)
                         logger.info(f"Incremental: {len(new_reviews)} new reviews for {app_id} ({locale})")
                     else:
                         logger.info(f"No truly new reviews for {app_id} ({locale})")
