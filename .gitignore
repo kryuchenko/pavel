@@ -166,3 +166,10 @@ yarn-error.log*
 *.key
 *.crt
 secrets/
+
+# PAVEL specific - temporary and test files
+temp_*.py
+test_*.py
+*_test_*.py
+*.tmp
+mongo-data/
