@@ -54,12 +54,17 @@ class GooglePlayIngester:
     - Robust error handling
     """
     
-    def __init__(self, mongo_client: Optional[MongoClient] = None):
+    def __init__(self, mongo_client: Optional[MongoClient] = None, collection_name: Optional[str] = None):
         self.config = get_config()
         self.mongo_client = mongo_client or self._get_mongo_client()
         self.db = self.mongo_client[self.config.MONGODB_DATABASE]
-        self.collection = self.db.reviews
+        
+        # Use custom collection name or default to 'reviews'
+        self.collection_name = collection_name or 'reviews'
+        self.collection = self.db[self.collection_name]
         self.rate_limiter = RateLimiter()
+        
+        logger.info(f"Using collection: {self.collection_name}")
         
         # Ensure indexes for performance
         self._ensure_indexes()
