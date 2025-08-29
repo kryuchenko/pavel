@@ -16,6 +16,7 @@ from pymongo.errors import DuplicateKeyError
 
 from pavel.core.config import get_config
 from pavel.core.logger import get_logger
+from pavel.embeddings.embedding_generator import EmbeddingGenerator
 from .rate_limiter import RateLimiter, RateLimit
 
 logger = get_logger(__name__)
@@ -64,7 +65,11 @@ class GooglePlayIngester:
         self.collection = self.db[self.collection_name]
         self.rate_limiter = RateLimiter()
         
+        # Initialize embedding generator for vector storage
+        self.embedding_generator = EmbeddingGenerator()
+        
         logger.info(f"Using collection: {self.collection_name}")
+        logger.info(f"Embedding model: {self.embedding_generator.config.model_name}")
         
         # Ensure indexes for performance
         self._ensure_indexes()
@@ -88,13 +93,35 @@ class GooglePlayIngester:
             [("locale", 1), ("country", 1)]     # Geographic analysis
         ]
         
+        # Vector search index for MongoDB 8+ (Atlas Vector Search compatible)
+        vector_indexes = [
+            {
+                "key": {"embedding.vector": "2dsphere"},  # For similarity search
+                "name": "embedding_vector_index",
+                "background": True
+            }
+        ]
+        
+        # Create regular indexes
         for index_spec in indexes:
             try:
                 self.collection.create_index(index_spec, background=True)
             except Exception as e:
                 logger.warning(f"Index creation warning: {e}")
+        
+        # Create vector indexes (for MongoDB 8+ vector search)
+        for vector_index in vector_indexes:
+            try:
+                self.collection.create_index(
+                    vector_index["key"], 
+                    name=vector_index["name"],
+                    background=vector_index.get("background", True)
+                )
+                logger.info(f"Created vector index: {vector_index['name']}")
+            except Exception as e:
+                logger.warning(f"Vector index creation warning (requires MongoDB 8+): {e}")
                 
-    def _transform_review(self, review: Dict, app_id: str, locale: str = 'en') -> Dict:
+    async def _transform_review(self, review: Dict, app_id: str, locale: str = 'en') -> Dict:
         """
         Transform raw Google Play review to PAVEL format.
         
@@ -145,6 +172,26 @@ class GooglePlayIngester:
             }
         })
         
+        # Generate embedding for review content (for semantic search and clustering)
+        content = review.get('content', '')
+        if content:
+            try:
+                embedding_result = await self.embedding_generator.generate_single_async(content)
+                doc["embedding"] = {
+                    "vector": embedding_result.embedding.tolist(),  # Convert numpy array to list for MongoDB
+                    "model": embedding_result.model_name,
+                    "dimension": embedding_result.embedding_dim,
+                    "language": locale,  # Store the language/locale for tracking
+                    "generated_at": now,
+                    "processing_time": embedding_result.processing_time
+                }
+                logger.debug(f"Generated {embedding_result.embedding_dim}D embedding for review {review_id}")
+            except Exception as e:
+                logger.warning(f"Failed to generate embedding for review {review_id}: {e}")
+                doc["embedding"] = None
+        else:
+            doc["embedding"] = None
+        
         return doc
         
     async def _fetch_reviews_batch(
@@ -188,8 +235,10 @@ class GooglePlayIngester:
             return
             
         try:
-            # Transform all reviews
-            docs = [self._transform_review(review, stats.app_id, locale) for review in reviews]
+            # Transform all reviews (async)
+            import asyncio
+            tasks = [self._transform_review(review, stats.app_id, locale) for review in reviews]
+            docs = await asyncio.gather(*tasks)
             
             # Bulk insert with ordered=False for duplicate tolerance
             result = self.collection.insert_many(docs, ordered=False)

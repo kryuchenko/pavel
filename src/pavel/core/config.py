@@ -60,6 +60,13 @@ class Config:
         self.API_PORT = int(os.getenv("PAVEL_API_PORT", "8080"))
         self.API_HOST = os.getenv("PAVEL_API_HOST", "0.0.0.0")
         
+        # Embedding model configuration
+        self.EMBEDDING_MODEL = os.getenv("PAVEL_EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+        self.EMBEDDING_BATCH_SIZE = int(os.getenv("PAVEL_EMBEDDING_BATCH_SIZE", "32"))
+        self.EMBEDDING_MAX_SEQ_LENGTH = int(os.getenv("PAVEL_EMBEDDING_MAX_SEQ_LENGTH", "512"))
+        self.EMBEDDING_DEVICE = os.getenv("PAVEL_EMBEDDING_DEVICE", "auto")  # "auto", "cpu", "cuda"
+        self.EMBEDDING_CACHE_TTL_HOURS = int(os.getenv("PAVEL_EMBEDDING_CACHE_TTL_HOURS", "24"))
+        
         # Create necessary directories
         self._create_directories()
     

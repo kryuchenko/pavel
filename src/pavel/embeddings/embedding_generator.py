@@ -95,7 +95,18 @@ class EmbeddingGenerator:
     """
     
     def __init__(self, config: Optional[EmbeddingConfig] = None):
-        self.config = config or EmbeddingConfig()
+        # Use config from main PAVEL config if not provided
+        if config is None:
+            pavel_config = get_config()
+            config = EmbeddingConfig(
+                model_name=pavel_config.EMBEDDING_MODEL,
+                batch_size=pavel_config.EMBEDDING_BATCH_SIZE,
+                max_seq_length=pavel_config.EMBEDDING_MAX_SEQ_LENGTH,
+                device=pavel_config.EMBEDDING_DEVICE,
+                cache_ttl_hours=pavel_config.EMBEDDING_CACHE_TTL_HOURS
+            )
+        
+        self.config = config
         self.model = None
         self.model_name = None
         self.embedding_cache = {}
