@@ -77,13 +77,13 @@ class ComplaintAnalyzer:
             print(f"📊 Getting daily/weekly review counts for normalization...")
             collection = self.db[app_id]
             
-            # Get all reviews in the period and count by day/week
+            # Get all reviews in the period and count by day/week (optimized query)
             all_reviews = collection.find({
                 'at': {
                     '$gte': start_date,
                     '$lte': end_date
                 }
-            }, {'at': 1})
+            }, {'_id': 0, 'at': 1})
             
             for review in all_reviews:
                 review_date = review.get('at')
@@ -115,9 +115,14 @@ class ComplaintAnalyzer:
         
         search_query = SearchQuery(
             text=query,
-            limit=1000,  # Get many results for analysis
+            limit=100_000,  # Large limit instead of None (safer for some drivers)
             min_similarity=min_similarity,
-            filter_params=None,  # Don't filter by date in MongoDB due to format issues
+            filter_params={
+                'at': {
+                    '$gte': start_date,
+                    '$lte': end_date
+                }
+            },  # Filter by date at MongoDB level for efficiency
             include_fields=['at', 'score', 'userName', 'locale', 'content']
         )
         
@@ -128,10 +133,10 @@ class ComplaintAnalyzer:
             search_engine.close()
             return {}
         
-        # Filter results to match the time period
+        # Process results (date filtering now handled by MongoDB filter_params)
         results = []
         for result in raw_results:
-            # Parse date
+            # Parse and normalize date
             review_date = result.document.get('at')
             if isinstance(review_date, str):
                 try:
@@ -147,10 +152,6 @@ class ComplaintAnalyzer:
                 review_date = review_date.replace(tzinfo=timezone.utc)
             else:
                 review_date = review_date.astimezone(timezone.utc)
-            
-            # Filter by date range - only include complaints in the specified period
-            if review_date < start_date or review_date > end_date:
-                continue
                 
             results.append({
                 'date': review_date,
@@ -234,29 +235,101 @@ class ComplaintAnalyzer:
         
         complaint_rate = (len(results) / total_reviews * 100) if total_reviews > 0 else 0
         
-        # Find peak periods
+        # Find peak periods - for normalized mode, find peak by percentage not absolute count
         peak_day = max(daily_counts.items(), key=lambda x: x[1]) if daily_counts else (None, 0)
-        peak_week = max(weekly_counts.items(), key=lambda x: x[1]) if weekly_counts else (None, 0)
         
-        # Trend analysis with deadband to avoid noise
-        if len(weekly_counts) >= 2:
-            weeks_sorted = sorted(weekly_counts.keys())
-            first_half = weeks_sorted[:len(weeks_sorted)//2]
-            second_half = weeks_sorted[len(weeks_sorted)//2:]
-            
-            avg_first = np.mean([weekly_counts[w] for w in first_half])
-            avg_second = np.mean([weekly_counts[w] for w in second_half])
-            
-            delta = avg_second - avg_first
-            # Add deadband to avoid false trends on small values/noise
-            if (avg_first < 1 and avg_second < 1) or abs(delta) < max(1.0, 0.1 * max(avg_first, 1e-9)):
-                trend_direction, trend_change = "➡️ Stable", 0
+        # For weekly peak, use same Bayesian smoothing as in visualization
+        if normalized and weekly_totals:
+            base_rate = (len(results) / total_reviews_count) if total_reviews_count > 0 else 0.0
+            ALPHA_WEEK = 7 * 20
+            def week_rate(w):
+                tot = weekly_totals.get(w, 0)
+                comp = weekly_counts.get(w, 0)
+                return ((comp) + ALPHA_WEEK * base_rate) / (tot + ALPHA_WEEK) if (tot + ALPHA_WEEK) > 0 else 0.0
+            if weekly_counts:
+                w_best = max(weekly_counts.keys(), key=week_rate)
+                peak_week = (w_best, weekly_counts[w_best])
             else:
-                trend_direction = "📈 Increasing" if delta > 0 else "📉 Decreasing"
-                trend_change = (delta / avg_first * 100) if avg_first > 0 else 0
+                peak_week = (None, 0)
         else:
-            trend_direction = "➡️ Stable"
-            trend_change = 0
+            peak_week = max(weekly_counts.items(), key=lambda x: x[1]) if weekly_counts else (None, 0)
+        
+        # Statistically robust trend analysis
+        def calc_mann_kendall_trend(weekly_counts):
+            """Calculate trend using Mann-Kendall test (non-parametric)."""
+            if len(weekly_counts) < 8:  # Need at least ~2 months
+                return "➡️ Too few points", 0
+            
+            # Get time-ordered values
+            ordered_weeks = sorted(weekly_counts.keys())
+            values = [weekly_counts[w] for w in ordered_weeks]
+            n = len(values)
+            
+            # Mann-Kendall S statistic
+            S = 0
+            for i in range(n-1):
+                for j in range(i+1, n):
+                    if values[j] > values[i]:
+                        S += 1
+                    elif values[j] < values[i]:
+                        S -= 1
+            
+            # Variance calculation with tie correction
+            from collections import Counter
+            tie_counts = list(Counter(values).values())
+            var_S = (n * (n - 1) * (2 * n + 5) - 
+                     sum(t * (t - 1) * (2 * t + 5) for t in tie_counts)) / 18
+            
+            # Z-score
+            if S > 0:
+                Z = (S - 1) / np.sqrt(var_S)
+            elif S < 0:
+                Z = (S + 1) / np.sqrt(var_S)
+            else:
+                Z = 0
+            
+            # p-value (two-tailed)
+            from scipy.stats import norm
+            p_value = 2 * (1 - norm.cdf(abs(Z)))
+            
+            # Determine significance (α = 0.05)
+            if p_value > 0.05:
+                return "➡️ Stable", 0
+            else:
+                trend_dir = "📈 Increasing" if S > 0 else "📉 Decreasing"
+                # Sen's slope as effect size (converted to percentage)
+                slopes = []
+                for i in range(n-1):
+                    for j in range(i+1, n):
+                        if j != i:
+                            slopes.append((values[j] - values[i]) / (j - i))
+                sen_slope = np.median(slopes) if slopes else 0
+                # Convert to percentage change per week relative to baseline
+                base = max(np.mean(values), 1e-9)
+                pct_change = sen_slope / base * 100
+                return trend_dir, pct_change
+        
+        try:
+            trend_direction, trend_change = calc_mann_kendall_trend(weekly_counts)
+        except Exception:
+            # Fallback to simple comparison if Mann-Kendall fails
+            if len(weekly_counts) >= 2:
+                weeks_sorted = sorted(weekly_counts.keys())
+                first_half = weeks_sorted[:len(weeks_sorted)//2]
+                second_half = weeks_sorted[len(weeks_sorted)//2:]
+                
+                avg_first = np.mean([weekly_counts[w] for w in first_half])
+                avg_second = np.mean([weekly_counts[w] for w in second_half])
+                
+                delta = avg_second - avg_first
+                if abs(delta) < max(1.0, 0.1 * max(avg_first, 1e-9)):
+                    trend_direction, trend_change = "➡️ Stable", 0
+                else:
+                    trend_direction = "📈 Increasing" if delta > 0 else "📉 Decreasing"
+                    trend_change = (delta / avg_first * 100) if avg_first > 0 else 0
+            else:
+                trend_direction = "➡️ Stable"
+                trend_change = 0
         
         # Print analysis
         print(f"\n📈 Analysis Results:")
@@ -332,8 +405,14 @@ class ComplaintAnalyzer:
         # Create figure with subplots
         fig = plt.figure(figsize=(16, 10))
         
+        # базовая доля жалоб за весь период для сглаживания
+        base_rate = (total_complaints / total_reviews_count) if (normalized and total_reviews_count > 0) else 0.0
+        ALPHA_DAY = 20          # эквивалент 20 отзывов в день
+        ALPHA_WEEK = 7 * ALPHA_DAY  # ~140 отзывов в неделю
+        
         # Main title
-        fig.suptitle(f'Complaint Analysis: "{query}"\n{app_id} - Last {months} months', 
+        title_suffix = " (Bayesian-smoothed, α=20/day, 140/week)" if normalized else ""
+        fig.suptitle(f'Complaint Analysis: "{query}"\n{app_id} - Last {months} months{title_suffix}', 
                     fontsize=16, fontweight='bold')
         
         # 1. Daily trend (main plot)
@@ -344,26 +423,36 @@ class ComplaintAnalyzer:
         df_daily = pd.DataFrame({'date': all_days})
         df_daily['count'] = df_daily['date'].dt.date.map(lambda d: daily_counts.get(d, 0)).astype(float)
         
-        # Apply normalization if requested - each day normalized to that day's total
+        # Apply normalization if requested - байесовское сглаживание без NaN
         if normalized and daily_totals:
-            def day_pct(d):
+            def day_rate(d):
                 tot = daily_totals.get(d, 0)
-                return (daily_counts.get(d, 0) / tot * 100) if tot > 0 else 0.0
-            df_daily['count'] = df_daily['date'].dt.date.map(day_pct)
+                comp = daily_counts.get(d, 0)
+                return 100.0 * ((comp) + ALPHA_DAY * base_rate) / (tot + ALPHA_DAY) if (tot + ALPHA_DAY) > 0 else 0.0
+            df_daily['count'] = df_daily['date'].dt.date.map(day_rate).astype(float)
+            # ничего не дропаем; дальше rolling уже по календарному времени
+            
+        # Check if we have any data left after filtering
+        if df_daily.empty:
+            print("⚠️ No data points left after filtering noisy days")
+            ax1.text(0.5, 0.5, 'Insufficient data\n(all days < 20 reviews)', 
+                    transform=ax1.transAxes, ha='center', va='center', fontsize=14)
         
         if len(df_daily) > 0:
             # Plot raw daily counts (more transparent to reduce noise)
+            label_daily = 'Daily rate (raw)' if normalized else 'Daily count (raw)'
             ax1.plot(df_daily['date'], df_daily['count'], 
-                    color='#8FB3D3', linewidth=0.8, alpha=0.3, label='Daily (raw)')
+                    color='#8FB3D3', linewidth=0.8, alpha=0.3, label=label_daily)
             
-            # Add 7-day moving average (main line)
-            df_daily['ma7'] = df_daily['count'].rolling(window=7, min_periods=1).mean()
+            # Add time-based rolling averages (not point-based)
+            df_daily = df_daily.sort_values('date')
+            df_daily['ma7'] = df_daily.set_index('date')['count'].rolling('7D', min_periods=3).mean().values
             ax1.plot(df_daily['date'], df_daily['ma7'], 
-                    color='#C7E9B4', linewidth=3, alpha=0.9, label='7-day average')
+                    color='#C7E9B4', linewidth=3, alpha=0.9, label='7-day trend')
             
             # Add 14-day moving average for longer trend
             if len(df_daily) > 14:
-                df_daily['ma14'] = df_daily['count'].rolling(window=14, min_periods=1).mean()
+                df_daily['ma14'] = df_daily.set_index('date')['count'].rolling('14D', min_periods=7).mean().values
                 ax1.plot(df_daily['date'], df_daily['ma14'], 
                         color='#FDB863', linewidth=2.5, alpha=0.8, label='14-day trend')
             
@@ -371,42 +460,55 @@ class ComplaintAnalyzer:
             ax1.fill_between(df_daily['date'], df_daily['ma7'], 
                            alpha=0.15, color='#C7E9B4')
             
-            # Mark peak day on 7-day average instead of raw data
-            peak_idx = df_daily['ma7'].idxmax()
-            ax1.scatter(df_daily.loc[peak_idx, 'date'], 
-                       df_daily.loc[peak_idx, 'ma7'],
-                       color='red', s=120, zorder=5, edgecolors='darkred', linewidth=2)
-            peak_value = df_daily.loc[peak_idx, 'ma7']
-            ax1.annotate(f'Peak: {peak_value:.1f}{"%" if normalized else ""}',
-                        xy=(df_daily.loc[peak_idx, 'date'], peak_value),
-                        xytext=(15, 15), textcoords='offset points',
-                        fontsize=10, color='darkred', fontweight='bold',
-                        bbox=dict(boxstyle='round,pad=0.4', fc='yellow', alpha=0.8, edgecolor='red'))
+            # Mark peak day on 7-day average (only if there's actual data)
+            if df_daily['ma7'].max() > 0:
+                peak_idx = df_daily['ma7'].idxmax()
+                ax1.scatter(df_daily.loc[peak_idx, 'date'], 
+                           df_daily.loc[peak_idx, 'ma7'],
+                           color='red', s=120, zorder=5, edgecolors='darkred', linewidth=2)
+                peak_value = df_daily.loc[peak_idx, 'ma7']
+                ax1.annotate(f'Peak: {peak_value:.1f}{"%" if normalized else ""}',
+                            xy=(df_daily.loc[peak_idx, 'date'], peak_value),
+                            xytext=(15, 15), textcoords='offset points',
+                            fontsize=10, color='darkred', fontweight='bold',
+                            bbox=dict(boxstyle='round,pad=0.4', fc='yellow', alpha=0.8, edgecolor='red'))
             
-            # Format x-axis
-            ax1.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
-            ax1.xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
+            # Format x-axis - adapt to period length
+            period_days = (end_date - start_date).days
+            if period_days > 365:  # > 12 months
+                ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+                ax1.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+            elif period_days > 120:  # > 4 months
+                ax1.xaxis.set_major_locator(mdates.MonthLocator())
+                ax1.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+            else:
+                ax1.xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
+                ax1.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
             plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
             
             # Calculate trend line using 7-day average (smoother trend)
+            show_trend = False
             if len(df_daily) > 7:
                 try:
                     x_numeric = (df_daily['date'] - df_daily['date'].min()).dt.days.values
                     z = np.polyfit(x_numeric, df_daily['ma7'].values, 1)
                     p = np.poly1d(z)
-                    ax1.plot(df_daily['date'], p(x_numeric), 
-                            "--", color='gray', alpha=0.7, linewidth=2, label='Overall trend')
+                    show_trend = True
                 except (np.linalg.LinAlgError, ValueError):
                     # Skip trend line if calculation fails
                     pass
             
+            if show_trend:
+                ax1.plot(df_daily['date'], p(x_numeric), 
+                        "--", color='gray', alpha=0.7, linewidth=2, label='Overall trend')
+            
         ax1.set_xlabel('Date')
         if normalized:
-            ax1.set_ylabel('Percentage of Total Reviews (%)')
-            ax1.set_title(f'Daily Complaint Trend - Normalized (Total: {total_complaints})')
+            ax1.set_ylabel('Daily Complaint Rate (%)')
+            ax1.set_title(f'Daily Complaint Rate Trend (Matched: {total_complaints}, Total reviews: {total_reviews_count:,})')
         else:
-            ax1.set_ylabel('Number of Complaints')
-            ax1.set_title(f'Daily Complaint Trend (Total: {total_complaints})')
+            ax1.set_ylabel('Daily Complaint Count')
+            ax1.set_title(f'Daily Complaint Count Trend (Total: {total_complaints})')
         ax1.legend(loc='upper left')
         ax1.grid(True, alpha=0.3)
         
@@ -418,19 +520,35 @@ class ComplaintAnalyzer:
             week_labels = [f"{w[0]}-W{w[1]:02d}" for w in weeks]  # Include year
             week_counts_list = [weekly_counts[w] for w in weeks]
             
-            # Apply normalization if requested - each week normalized to that week's total
+            # Apply normalization if requested - байесовское сглаживание
+            weighted_avg = None
             if normalized and weekly_totals:
-                normalized_week_counts = []
-                for week in weeks:
-                    complaint_count = weekly_counts[week]
-                    total_for_week = weekly_totals.get(week, 0)  # Use 0 instead of 1
-                    normalized_week_counts.append((complaint_count / total_for_week * 100) if total_for_week > 0 else 0.0)
-                week_counts_list = normalized_week_counts
+                def week_rate(w):
+                    tot = weekly_totals.get(w, 0)
+                    comp = weekly_counts.get(w, 0)
+                    return 100.0 * ((comp) + ALPHA_WEEK * base_rate) / (tot + ALPHA_WEEK) if (tot + ALPHA_WEEK) > 0 else 0.0
+
+                week_counts_list = [week_rate(w) for w in weeks]
+
+                # честная взвешенная средняя (без сглаживания): это глобальная доля
+                tot_comp = sum(weekly_counts[w] for w in weeks)
+                tot_rev  = sum(weekly_totals.get(w, 0) for w in weeks)
+                weighted_avg = (100.0 * tot_comp / tot_rev) if tot_rev else 0.0
             
-            colors = ['#FDB863' if c > np.mean(week_counts_list) else '#C7E9B4' 
-                     for c in week_counts_list]
+            # Color based on whether above/below mean
+            colors = []
+            mean_val = np.mean(week_counts_list) if week_counts_list else 0
+            for c in week_counts_list:
+                if c > mean_val:
+                    colors.append('#FDB863')
+                else:
+                    colors.append('#C7E9B4')
             
+            # подсвети «тонкие» недели меньшей прозрачностью, но не скрывай
+            alphas = [0.4 if weekly_totals.get(w, 0) < ALPHA_WEEK else 1.0 for w in weeks]
             bars = ax2.bar(range(len(weeks)), week_counts_list, color=colors)
+            for bar, a in zip(bars, alphas):
+                bar.set_alpha(a)
             ax2.set_xticks(range(len(weeks)))
             ax2.set_xticklabels(week_labels, rotation=45)
             
@@ -442,17 +560,34 @@ class ComplaintAnalyzer:
                         label, ha='center', va='bottom', fontsize=8)
             
             # Add average line
-            avg = np.mean(week_counts_list)
-            ax2.axhline(y=avg, color='red', linestyle='--', alpha=0.5, 
-                       label=f'Avg: {avg:.1f}{"%" if normalized else ""}')
+            if normalized:
+                ax2.axhline(y=weighted_avg, color='red', linestyle='--', alpha=0.6,
+                           label=f'Weighted avg: {weighted_avg:.1f}%')
+            else:
+                avg = np.mean(week_counts_list) if week_counts_list else 0
+                ax2.axhline(y=avg, color='red', linestyle='--', alpha=0.5, 
+                           label=f'Avg: {avg:.1f}')
             
         ax2.set_xlabel('Week')
         if normalized:
-            ax2.set_ylabel('Percentage of Total Reviews (%)')
-            ax2.set_title('Weekly Distribution - Normalized')
+            ax2.set_ylabel('Complaint Rate (%)')
+            # Calculate peak week for normalized display
+            valid_counts = [c for c in week_counts_list if not np.isnan(c)]
+            if valid_counts:
+                max_week_idx = next(i for i, c in enumerate(week_counts_list) if c == max(valid_counts))
+                peak_week_label = week_labels[max_week_idx]
+                ax2.set_title(f'Weekly Complaint Rate (Peak: {peak_week_label} at {max(valid_counts):.1f}%)')
+            else:
+                ax2.set_title('Weekly Complaint Rate - Normalized')
         else:
-            ax2.set_ylabel('Complaints per Week')
-            ax2.set_title('Weekly Distribution')
+            ax2.set_ylabel('Complaint Count')
+            # Find peak week for absolute counts
+            if week_counts_list:
+                max_week_idx = week_counts_list.index(max(week_counts_list))
+                peak_week_label = week_labels[max_week_idx]
+                ax2.set_title(f'Weekly Complaint Count (Peak: {peak_week_label} with {max(week_counts_list)})')
+            else:
+                ax2.set_title('Weekly Complaint Count')
         ax2.legend()
         ax2.grid(True, alpha=0.3, axis='y')
         
