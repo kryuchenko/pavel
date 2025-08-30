@@ -1,0 +1,32 @@
+{
+  "name": "vector-search-index",
+  "type": "vectorSearch", 
+  "fields": [
+    {
+      "type": "vector",
+      "path": "embedding.vector",
+      "numDimensions": 1024,
+      "similarity": "cosine"
+    },
+    {
+      "type": "filter",
+      "path": "locale"
+    },
+    {
+      "type": "filter", 
+      "path": "score"
+    },
+    {
+      "type": "filter",
+      "path": "appId"
+    },
+    {
+      "type": "filter",
+      "path": "at"
+    },
+    {
+      "type": "filter",
+      "path": "flags.isRecent"
+    }
+  ]
+}

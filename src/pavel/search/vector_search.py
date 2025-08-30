@@ -98,10 +98,10 @@ class VectorSearchEngine:
         pipeline = [
             {
                 "$vectorSearch": {
-                    "index": "vector_search_index",  # Vector search index name
+                    "index": "vector-search-index",  # Match our vector_index.json config
                     "path": "embedding.vector",
                     "queryVector": query_vector.tolist(),
-                    "numCandidates": query.limit * 10,  # Candidate pool size
+                    "numCandidates": min(query.limit * 20, 1000),  # Optimized candidate pool
                     "limit": query.limit
                 }
             }
@@ -160,61 +160,83 @@ class VectorSearchEngine:
     
     async def _memory_vector_search(self, query: SearchQuery, query_vector: np.ndarray) -> List[SearchResult]:
         """
-        Perform vector search using in-memory similarity calculation.
+        Optimized vector search using in-memory similarity calculation.
         Fallback method when Atlas Vector Search is not available.
         """
-        # Build MongoDB filter
+        # Build MongoDB filter with optimizations
         mongo_filter = {"embedding": {"$ne": None}}
         if query.filter_params:
             mongo_filter.update(query.filter_params)
         
-        # Project fields for efficiency
+        # Project only essential fields for efficiency
         projection = {
             "embedding.vector": 1,
             "content": 1,
             "score": 1,
             "locale": 1,
             "reviewId": 1,
-            "appId": 1,
-            "at": 1,
-            "userName": 1
+            "appId": 1
         }
         
         if query.include_fields:
             for field in query.include_fields:
                 projection[field] = 1
         
-        # Get all documents with embeddings
+        # Get documents - remove problematic hint that doesn't exist
         cursor = self.collection.find(mongo_filter, projection)
-        documents = list(cursor)
         
+        documents = list(cursor)
         logger.info(f"Calculating similarity for {len(documents)} documents")
         
-        # Calculate similarities
-        similarities = []
+        if not documents:
+            return []
+        
+        # Vectorized similarity calculation for better performance
+        doc_vectors = []
+        doc_metadata = []
+        
         for doc in documents:
             embedding_data = doc.get('embedding')
             if not embedding_data or not embedding_data.get('vector'):
                 continue
-            
-            doc_vector = np.array(embedding_data['vector'])
-            similarity = self._cosine_similarity(query_vector, doc_vector)
-            
+                
+            vector = embedding_data['vector']
+            if len(vector) != len(query_vector):
+                logger.warning(f"Vector dimension mismatch: expected {len(query_vector)}, got {len(vector)}")
+                continue
+                
+            doc_vectors.append(vector)
+            doc_metadata.append(doc)
+        
+        if not doc_vectors:
+            return []
+        
+        # Batch cosine similarity calculation
+        doc_matrix = np.array(doc_vectors)
+        
+        # Normalize vectors for cosine similarity
+        query_norm = query_vector / np.linalg.norm(query_vector)
+        doc_norms = doc_matrix / np.linalg.norm(doc_matrix, axis=1, keepdims=True)
+        
+        # Calculate similarities in batch
+        similarities = np.dot(doc_norms, query_norm)
+        
+        # Create results with similarity filtering
+        results_data = []
+        for i, (similarity, doc) in enumerate(zip(similarities, doc_metadata)):
             if similarity >= query.min_similarity:
-                similarities.append((similarity, doc))
+                results_data.append((similarity, doc))
         
-        # Sort by similarity (descending)
-        similarities.sort(key=lambda x: x[0], reverse=True)
-        
-        # Take top results
-        top_similarities = similarities[:query.limit]
+        # Sort by similarity (descending) and take top results
+        results_data.sort(key=lambda x: x[0], reverse=True)
+        top_results = results_data[:query.limit]
         
         # Convert to SearchResult objects
         results = []
-        for similarity, doc in top_similarities:
+        for similarity, doc in top_results:
             result = SearchResult(
                 document=doc,
-                similarity=similarity,
+                similarity=float(similarity),  # Convert numpy float to Python float
                 score=doc.get('score', 0),
                 content=doc.get('content', ''),
                 locale=doc.get('locale', ''),
