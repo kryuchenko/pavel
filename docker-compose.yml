@@ -1,19 +1,23 @@
 version: '3.8'
 
 services:
+  # MongoDB database
   mongodb:
-    image: mongodb/mongodb-community-server:8.0-ubuntu2204
-    container_name: pavel_mongodb
+    image: mongo:8.0
+    container_name: pavel-mongodb
     restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: pavel
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-pavel123}
+      MONGO_INITDB_DATABASE: gp
     ports:
       - "27017:27017"
-    environment:
-      - MONGODB_INITDB_DATABASE=pavel_reviews
     volumes:
       - mongodb_data:/data/db
-      - mongodb_config:/data/configdb
+      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    command: mongod --auth
     networks:
-      - pavel_network
+      - pavel-network
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
@@ -21,12 +25,56 @@ services:
       retries: 5
       start_period: 30s
 
+  # PAVEL Application
+  pavel:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: pavel-app
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+    environment:
+      # Database
+      PAVEL_DB_URI: mongodb://pavel:${MONGO_PASSWORD:-pavel123}@mongodb:27017/gp?authSource=admin
+      PAVEL_DB_NAME: gp
+      
+      # Default app
+      PAVEL_DEFAULT_APP_ID: com.nianticlabs.pokemongo
+      
+      # Embedding model
+      PAVEL_EMBEDDING_MODEL: intfloat/multilingual-e5-large
+      PAVEL_EMBEDDING_DEVICE: cpu
+      
+      # API
+      PAVEL_API_HOST: 0.0.0.0
+      PAVEL_API_PORT: 8080
+      
+      # Logging
+      PAVEL_LOG_LEVEL: INFO
+      PAVEL_LOG_FORMAT: json
+      
+      # Features
+      PAVEL_ENABLE_DEDUPLICATION: "true"
+      PAVEL_ENABLE_COMPLAINT_FILTER: "true"
+      PAVEL_ENABLE_AUTO_CLUSTERING: "true"
+      PAVEL_ENABLE_TREND_ANALYSIS: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./logs:/app/logs
+      - ./models:/app/models
+      - ./data:/app/data
+      - ./secrets:/app/secrets
+      - ./.env:/app/.env:ro
+    networks:
+      - pavel-network
+    command: tail -f /dev/null  # Keep container running for manual commands
+
+networks:
+  pavel-network:
+    driver: bridge
+
 volumes:
   mongodb_data:
     driver: local
-  mongodb_config:
-    driver: local
-
-networks:
-  pavel_network:
-    driver: bridge
