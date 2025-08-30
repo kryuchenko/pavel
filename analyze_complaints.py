@@ -26,8 +26,55 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import seaborn as sns
 import pandas as pd
+from scipy.stats import betabinom, beta
 
 logger = get_logger(__name__)
+
+def compute_rate_anomalies(bucket_counts, bucket_totals, base_rate, alpha, level=0.01):
+    """
+    Detect anomalous complaint rates using beta-binomial predictive distribution.
+    
+    Args:
+        bucket_counts: Dict mapping periods to complaint counts
+        bucket_totals: Dict mapping periods to total review counts  
+        base_rate: Global complaint rate (used as prior mean)
+        alpha: Prior strength (equivalent sample size)
+        level: Significance level for anomaly detection
+    
+    Returns:
+        List of anomalies with statistics
+    """
+    a0 = base_rate * alpha
+    b0 = (1 - base_rate) * alpha
+    anomalies = []
+    
+    for key in sorted(bucket_totals):
+        n = bucket_totals.get(key, 0)       # все отзывы
+        k = bucket_counts.get(key, 0)       # совпавшие жалобы
+        if n == 0: 
+            continue
+            
+        # двусторонний p-value под Beta-Binomial
+        cdf = betabinom.cdf(k, n, a0, b0)
+        pmf = betabinom.pmf(k, n, a0, b0)
+        p = 2 * min(cdf, 1 - cdf + pmf)     # консервативно
+        
+        if p < level:
+            # 95% credible interval для истинной доли
+            ql = beta.ppf(0.025, a0 + k, b0 + n - k)
+            qh = beta.ppf(0.975, a0 + k, b0 + n - k)
+            
+            anomalies.append({
+                "bucket": key, 
+                "k": int(k), 
+                "n": int(n),
+                "rate_pct": 100 * k / n, 
+                "p_value": float(p),
+                "ci95": (100 * ql, 100 * qh),
+                "severity": "high" if p < 0.001 else "medium"
+            })
+    
+    return anomalies
 
 class ComplaintAnalyzer:
     """Analyze complaints and visualize trends."""
@@ -199,6 +246,14 @@ class ComplaintAnalyzer:
             scores_by_date.append((review_date, result['rating']))
         
         # Create visualization
+        # Detect statistical anomalies using beta-binomial test BEFORE creating graph
+        daily_anomalies = []
+        weekly_anomalies = []
+        if normalized and total_reviews_count > 0:
+            base_rate = len(results) / total_reviews_count
+            daily_anomalies = compute_rate_anomalies(daily_counts, daily_totals, base_rate, alpha=20, level=0.05)
+            weekly_anomalies = compute_rate_anomalies(weekly_counts, weekly_totals, base_rate, alpha=140, level=0.05)
+
         print("\n📊 Creating visualization...")
         
         if not output_file:
@@ -219,7 +274,9 @@ class ComplaintAnalyzer:
             daily_totals=daily_totals,
             weekly_totals=weekly_totals,
             start_date=start_date,
-            end_date=end_date
+            end_date=end_date,
+            daily_anomalies=daily_anomalies,
+            weekly_anomalies=weekly_anomalies
         )
         
         # Calculate statistics - use the same method as normalization
@@ -331,6 +388,7 @@ class ComplaintAnalyzer:
                 trend_direction = "➡️ Stable"
                 trend_change = 0
         
+        
         # Print analysis
         print(f"\n📈 Analysis Results:")
         print(f"  • Total matching complaints: {len(results)}")
@@ -342,6 +400,19 @@ class ComplaintAnalyzer:
         pk_week_label = (f"{peak_week[0][0]}-W{peak_week[0][1]:02d}" if peak_week[0] else "—")
         print(f"  • Peak week: {pk_week_label} ({peak_week[1]} complaints)")
         print(f"  • Trend: {trend_direction} ({trend_change:+.1f}%)")
+        
+        # Print top anomalies if found
+        all_anomalies = daily_anomalies + weekly_anomalies
+        if all_anomalies:
+            print(f"\n🚨 Statistical Anomalies Detected ({len(all_anomalies)} total):")
+            # Sort by significance (lowest p-value first)
+            top_anomalies = sorted(all_anomalies, key=lambda x: x['p_value'])[:5]
+            for anom in top_anomalies:
+                period_type = "daily" if isinstance(anom['bucket'], datetime) else "weekly"  
+                bucket_str = anom['bucket'].strftime('%Y-%m-%d') if isinstance(anom['bucket'], datetime) else f"{anom['bucket'][0]}-W{anom['bucket'][1]:02d}"
+                severity_emoji = "🔥" if anom['severity'] == 'high' else "⚠️"
+                print(f"  {severity_emoji} {bucket_str} ({period_type}): {anom['rate_pct']:.1f}% ({anom['k']}/{anom['n']}) p={anom['p_value']:.3f}")
+                print(f"      95% CI: [{anom['ci95'][0]:.1f}%, {anom['ci95'][1]:.1f}%]")
         
         # Language distribution - clean empty/invalid locales
         lang_dist = defaultdict(int)
@@ -393,7 +464,9 @@ class ComplaintAnalyzer:
                            daily_totals: Dict = None,
                            weekly_totals: Dict = None,
                            start_date: datetime = None,
-                           end_date: datetime = None):
+                           end_date: datetime = None,
+                           daily_anomalies: List = None,
+                           weekly_anomalies: List = None):
         """Create beautiful trend visualization."""
         
         # Set style with pastel colors
@@ -473,6 +546,22 @@ class ComplaintAnalyzer:
                             fontsize=10, color='darkred', fontweight='bold',
                             bbox=dict(boxstyle='round,pad=0.4', fc='yellow', alpha=0.8, edgecolor='red'))
             
+            # Mark daily anomalies with red triangles
+            if daily_anomalies:
+                anomaly_dates = [anom['bucket'] for anom in daily_anomalies]
+                for anom_date in anomaly_dates:
+                    # Find corresponding value in df_daily
+                    matching_rows = df_daily[df_daily['date'].dt.date == anom_date.date()]
+                    if not matching_rows.empty:
+                        idx = matching_rows.index[0]
+                        y_val = df_daily.loc[idx, 'ma7'] if 'ma7' in df_daily.columns else df_daily.loc[idx, 'count']
+                        ax1.scatter(df_daily.loc[idx, 'date'], y_val,
+                                   marker='^', color='red', s=100, zorder=10, 
+                                   edgecolors='darkred', linewidth=2)
+                        ax1.annotate('⚠️', xy=(df_daily.loc[idx, 'date'], y_val),
+                                    xytext=(0, 10), textcoords='offset points',
+                                    fontsize=12, ha='center', color='red')
+            
             # Format x-axis - adapt to period length
             period_days = (end_date - start_date).days
             if period_days > 365:  # > 12 months
@@ -551,6 +640,18 @@ class ComplaintAnalyzer:
                 bar.set_alpha(a)
             ax2.set_xticks(range(len(weeks)))
             ax2.set_xticklabels(week_labels, rotation=45)
+            
+            # Highlight weekly anomalies with red borders
+            if weekly_anomalies:
+                anom_weeks = {anom['bucket'] for anom in weekly_anomalies}
+                for i, w in enumerate(weeks):
+                    if w in anom_weeks:
+                        bars[i].set_edgecolor('red')
+                        bars[i].set_linewidth(3)
+                        # Add warning emoji above anomalous weeks
+                        height = bars[i].get_height()
+                        ax2.annotate('🚨', xy=(i, height), xytext=(0, 15), 
+                                   textcoords='offset points', ha='center', fontsize=14)
             
             # Add value labels on bars with proper formatting
             for bar, count in zip(bars, week_counts_list):
