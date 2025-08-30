@@ -45,6 +45,7 @@ class VectorSearchEngine:
     
     def __init__(self, collection_name: str, mongo_client: Optional[MongoClient] = None):
         self.config = get_config()
+        self._owns_connection = mongo_client is None  # Track if we own the connection
         self.mongo_client = mongo_client or self._get_mongo_client()
         self.db = self.mongo_client[self.config.MONGODB_DATABASE]
         self.collection = self.db[collection_name]
@@ -389,7 +390,9 @@ class VectorSearchEngine:
         }
     
     def close(self):
-        """Close database connection."""
-        if self.mongo_client:
+        """Close database connection only if we own it."""
+        if self.mongo_client and self._owns_connection:
             self.mongo_client.close()
             logger.info("Closed vector search database connection")
+        elif self.mongo_client and not self._owns_connection:
+            logger.info("Using shared connection - not closing")
