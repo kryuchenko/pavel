@@ -8,6 +8,7 @@ import asyncio
 import argparse
 import sys
 from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
 from pathlib import Path
 from typing import Optional
 import logging
@@ -38,7 +39,8 @@ class AppIngester:
     async def ingest_and_embed(self, 
                                app_id: str, 
                                months: int = 3,
-                               languages: Optional[list] = None) -> dict:
+                               languages: Optional[list] = None,
+                               countries: Optional[list] = None) -> dict:
         """
         Ingest reviews and generate embeddings.
         
@@ -46,6 +48,7 @@ class AppIngester:
             app_id: Google Play app ID
             months: Number of months to fetch
             languages: List of language codes (default: all major languages)
+            countries: List of country codes (default: auto-map from languages)
             
         Returns:
             Statistics dictionary
@@ -56,11 +59,12 @@ class AppIngester:
         print(f"\n📱 Ingesting reviews for: {app_id}")
         print(f"📅 Period: last {months} months")
         print(f"🌍 Languages: {', '.join(languages)}")
+        if countries:
+            print(f"🏁 Countries: {', '.join(countries)}")
         print("-" * 50)
         
-        # Calculate date range
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=months * 30)
+        # Calculate date range - precise calendar months using relativedelta
+        start_date = datetime.utcnow() - relativedelta(months=months)
         
         # Phase 1: Collect reviews with proper pagination and locale mapping
         print("\n📥 Phase 1: Collecting reviews...")
@@ -83,86 +87,114 @@ class AppIngester:
         per_lang_stats = {}
         
         for lang in tqdm(languages, desc="Languages"):
-            country = LOCALE_TO_COUNTRY.get(lang, "us")
-            fetched_lang = 0
-            token = None
-            stop = False
+            # Support multiple countries per language for better coverage
+            country_list = countries or [LOCALE_TO_COUNTRY.get(lang, "us")]
             
-            while not stop:
-                try:
-                    batch, token = fetch_reviews(
-                        app_id,
-                        lang=lang,
-                        country=country,
-                        sort=Sort.NEWEST,  # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: сортировка по новизне
-                        count=PAGE_SIZE,
-                        continuation_token=token
-                    )
-                    # Manual sleep instead of parameter
-                    if SLEEP_MS > 0:
-                        time.sleep(SLEEP_MS / 1000.0)
-                except Exception as e:
-                    logger.warning(f"[{lang}-{country}] fetch failed: {e}")
-                    break
+            for country in country_list:
+                fetched_pair = 0
+                token = None
+                stop = False
                 
-                if not batch:
-                    break
-                
-                # Трансформация и фильтр по дате с ранним выходом
-                transformed = []
-                oldest_in_batch = None
-                
-                for r in batch:
-                    tr = await self.ingester._transform_review(r, app_id, lang)
-                    at = tr.get("at")
+                while not stop:
+                    try:
+                        batch, token = fetch_reviews(
+                            app_id,
+                            lang=lang,
+                            country=country,
+                            sort=Sort.NEWEST,  # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: сортировка по новизне
+                            count=PAGE_SIZE,
+                            continuation_token=token,
+                            sleep_milliseconds=SLEEP_MS  # Передаём паузу напрямую в библиотеку
+                        )
+                    except Exception as e:
+                        logger.warning(f"[{lang}-{country}] fetch failed: {e}")
+                        break
                     
-                    if isinstance(at, str):
-                        try:
-                            at = datetime.fromisoformat(at.replace("Z", "+00:00"))
-                        except Exception:
-                            continue
-                    if at and at.tzinfo:
-                        at = at.replace(tzinfo=None)
+                    if not batch:
+                        break
                     
-                    if at:
-                        if oldest_in_batch is None or at < oldest_in_batch:
-                            oldest_in_batch = at
-                        if at >= start_date:
-                            transformed.append(tr)
+                    # Трансформация и фильтр по дате с ранним выходом
+                    transformed = []
+                    oldest_in_batch = None
+                    
+                    for r in batch:
+                        tr = await self.ingester._transform_review(r, app_id, lang)
+                        at = tr.get("at")
+                        
+                        if isinstance(at, str):
+                            try:
+                                at = datetime.fromisoformat(at.replace("Z", "+00:00"))
+                            except Exception:
+                                continue
+                        if at and at.tzinfo:
+                            at = at.replace(tzinfo=None)
+                        
+                        if at:
+                            if oldest_in_batch is None or at < oldest_in_batch:
+                                oldest_in_batch = at
+                            if at >= start_date:
+                                transformed.append(tr)
+                    
+                    # Апсертим только подходящее по дате, отслеживая новые вставки
+                    new_inserts = 0
+                    for review in transformed:
+                        review["_id"] = f"{app_id}:{review['reviewId']}"
+                        review["appId"] = app_id
+                        review["locale"] = lang
+                        review["country"] = country
+                        
+                        res = collection.update_one(
+                            {"_id": review["_id"]},
+                            {
+                                "$set": review,
+                                "$addToSet": {"sources": {"lang": lang, "country": country}}
+                            },
+                            upsert=True
+                        )
+                        if res.upserted_id is not None:
+                            new_inserts += 1
+                    
+                    total_reviews += new_inserts  # только реально новые
+                    fetched_pair += len(transformed)  # все обработанные (включая дубли)
+                    
+                    # если уже дошли до отзывов старше нужной даты — прекращаем пагинацию
+                    if oldest_in_batch and oldest_in_batch < start_date:
+                        stop = True
+                    
+                    # защитный лимит
+                    if fetched_pair >= MAX_PER_LANG:
+                        stop = True
+                    
+                    if not token:
+                        break
                 
-                # Апсертим только подходящее по дате
-                for review in transformed:
-                    review["_id"] = f"{app_id}:{review['reviewId']}"
-                    review["appId"] = app_id
-                    review["locale"] = lang
-                    collection.update_one({"_id": review["_id"]}, {"$set": review}, upsert=True)
-                
-                total_reviews += len(transformed)
-                fetched_lang += len(transformed)
-                
-                # если уже дошли до отзывов старше нужной даты — прекращаем пагинацию
-                if oldest_in_batch and oldest_in_batch < start_date:
-                    stop = True
-                
-                # защитный лимит
-                if fetched_lang >= MAX_PER_LANG:
-                    stop = True
-                
-                if not token:
-                    break
-            
-            per_lang_stats[lang] = fetched_lang
-            logger.info(f"[{lang}-{country}] collected {fetched_lang}")
+                per_lang_stats[f"{lang}-{country}"] = fetched_pair
+                logger.info(f"[{lang}-{country}] collected {fetched_pair}")
         
-        print(f"✅ Collected {total_reviews} reviews")
-        print("Per-language:", per_lang_stats)
+        # Calculate total processed (including duplicates from different sources)
+        total_processed = sum(per_lang_stats.values())
+        
+        print(f"✅ Collected {total_reviews} new reviews (processed {total_processed} total)")
+        print("Per-language-country:", per_lang_stats)
+        
+        # Create optimized indexes for fast queries
+        try:
+            collection.create_index([("locale", 1), ("at", -1)], background=True)
+            collection.create_index([("score", 1)], background=True)
+            collection.create_index([("embedding.created_at", -1)], background=True)
+            logger.info("Created composite indexes for efficient querying")
+        except Exception as e:
+            logger.warning(f"Index creation failed (may already exist): {e}")
         
         # Phase 2: Generate embeddings
         print("\n🧠 Phase 2: Generating embeddings...")
         
-        # Get reviews without embeddings
+        # Get reviews without embeddings, excluding empty content
         reviews_to_embed = list(collection.find(
-            {'embedding': {'$exists': False}},
+            {
+                'embedding': {'$exists': False},
+                'content': {'$type': 'string', '$ne': ''}
+            },
             {'_id': 1, 'content': 1, 'locale': 1}
         ))
         
@@ -211,18 +243,12 @@ class AppIngester:
         
         print(f"✅ Generated {embedded_count} embeddings")
         
-        # Create indexes
-        print("\n🔍 Creating indexes...")
-        collection.create_index([("at", -1)])
-        collection.create_index([("score", 1)])
-        collection.create_index([("locale", 1)])
-        collection.create_index([("embedding.created_at", -1)])
-        print("✅ Indexes created")
-        
         # Final statistics
+        total_processed = sum(per_lang_stats.values())
         stats = {
             'app_id': app_id,
             'total_reviews': total_reviews,
+            'total_processed': total_processed,
             'embedded_reviews': embedded_count,
             'languages': languages,
             'months': months,
@@ -231,11 +257,12 @@ class AppIngester:
         }
         
         print("\n📊 Final Statistics:")
-        print(f"  • Total reviews collected: {stats['total_reviews']}")
+        print(f"  • New unique reviews: {stats['total_reviews']}")
+        print(f"  • Total processed (incl. duplicates): {total_processed}")
         print(f"  • New embeddings created: {stats['embedded_reviews']}")
         print(f"  • Total collection size: {stats['collection_size']}")
         print(f"  • Total with embeddings: {stats['embeddings_count']}")
-        print(f"  • Coverage: {stats['embeddings_count']/stats['collection_size']*100:.1f}%")
+        print(f"  • Embedding coverage: {stats['embeddings_count']/stats['collection_size']*100:.1f}%")
         
         return stats
     
@@ -266,6 +293,8 @@ Examples:
                        help='Number of months to fetch (default: 3)')
     parser.add_argument('--languages', nargs='+',
                        help='Language codes (default: all major languages)')
+    parser.add_argument('--countries', nargs='+',
+                       help='Country codes (e.g. ru kz uz ge for Yandex coverage)')
     parser.add_argument('--db-uri', help='MongoDB URI (overrides config)')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Verbose output')
@@ -292,7 +321,8 @@ Examples:
         stats = await ingester.ingest_and_embed(
             app_id=args.app_id,
             months=args.months,
-            languages=args.languages
+            languages=args.languages,
+            countries=args.countries
         )
         
         elapsed = time.time() - start_time
