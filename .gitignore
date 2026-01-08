@@ -1,0 +1,51 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+
+# Test binary
+*.test
+
+# Output of go coverage tool
+*.out
+
+# Go workspace
+go.work
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# Models (large files)
+models/
+
+# Data
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Vendor (optional)
+# vendor/
+
+# Dependencies
+deps/
+
+# IDE
+.vscode/
+
+# Binary
+pavel
