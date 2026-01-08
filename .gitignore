@@ -49,3 +49,6 @@ deps/
 
 # Binary
 pavel
+
+# Generated HTML reports
+*.html

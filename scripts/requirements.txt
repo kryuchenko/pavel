@@ -1,0 +1,8 @@
+bertopic==0.17.4
+hdbscan
+umap-learn
+scikit-learn
+numpy
+pandas
+psycopg2-binary
+plotly
